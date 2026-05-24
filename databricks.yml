@@ -1,0 +1,25 @@
+# Databricks Bundle Configuration
+bundle:
+  name: ifood-taxi-analytics
+
+include:
+  - resources/*.yml
+
+# Variables for environment-specific configuration
+variables:
+  catalog:
+    description: Unity Catalog name
+    default: prod
+  
+  cluster_node_type:
+    description: Node type for job clusters
+    default: i3.xlarge
+
+# Targets for different environments
+targets:
+  prod:
+    mode: production
+    workspace:
+      root_path: /Shared/.bundle/${bundle.name}/${bundle.target}
+    variables:
+      catalog: gold

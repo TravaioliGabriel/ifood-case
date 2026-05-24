@@ -1,0 +1,31 @@
+# iFood Case - Dependências
+# O Databricks Runtime já inclui estes pacotes
+# Este arquivo é para referência e desenvolvimento local
+
+# Processamento de Dados Core
+pyspark>=3.5.0
+
+# Delta Lake (incluído no Databricks Runtime)
+delta-spark>=3.0.0
+
+# Análise de Dados & Visualização (opcional para desenvolvimento local)
+pandas>=2.0.0
+numpy>=1.24.0
+
+# Utilitários Databricks
+# dbutils está automaticamente disponível em notebooks Databricks
+# Nenhuma instalação necessária
+
+# Unity Catalog
+# Suporte nativo no Databricks - nenhum pacote adicional necessário
+
+# Ferramentas de Desenvolvimento (opcional)
+# pytest>=7.4.0  # Para testes unitários
+# great-expectations>=0.18.0  # Para validação de qualidade de dados
+# pyyaml>=6.0  # Para parsing de YAML (configuração DABs)
+
+# Notas:
+# - PySpark, Delta Lake e dbutils estão pré-instalados no Databricks Runtime
+# - Unity Catalog está nativamente integrado - nenhuma configuração adicional
+# - Este arquivo serve principalmente como documentação das dependências do projeto
+# - Para desenvolvimento local, instale com: pip install -r requirements.txt

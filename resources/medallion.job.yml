@@ -1,0 +1,55 @@
+resources:
+  jobs:
+    medallion_pipeline:
+      name: "[${bundle.target}] Medallion Pipeline - Taxi Data"
+      
+      # Job parameters
+      parameters:
+        - name: catalog_name
+          default: ${var.catalog}
+      
+      tasks:
+        # Task 1: Bronze Layer
+        - task_key: bronze_ingestion
+          notebook_task:
+            notebook_path: ../src/bronze ingestion.ipynb
+            source: WORKSPACE
+          
+          timeout_seconds: 3600
+          max_retries: 2
+        
+        # Task 2: Silver Layer
+        - task_key: silver_transformation
+          depends_on:
+            - task_key: bronze_ingestion
+          
+          notebook_task:
+            notebook_path: ../src/silver transformation.ipynb
+            source: WORKSPACE
+          
+          timeout_seconds: 3600
+          max_retries: 2
+        
+        # Task 3: Gold Layer
+        - task_key: gold_transformation
+          depends_on:
+            - task_key: silver_transformation
+          
+          notebook_task:
+            notebook_path: ../src/gold transformation.ipynb
+            source: WORKSPACE
+          
+          timeout_seconds: 3600
+          max_retries: 2
+      
+      # Job-level settings
+      max_concurrent_runs: 1
+      timeout_seconds: 3600 # 1 hora
+      
+      queue:
+        enabled: true
+      
+      tags:
+        environment: ${bundle.target}
+        project: ifood-taxi-analytics
+        architecture: medallion
