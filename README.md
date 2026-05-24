@@ -404,7 +404,7 @@ Para dúvidas ou problemas, abra uma issue neste repositório.
 
 ---
 **Autor**: Gabriel Travaioli  
-**Data**: Janeiro 2025  
+**Data**: Maio 2026  
 **Plataforma**: Databricks Community Edition  
 **Arquitetura**: Medallion (Bronze → Silver → Gold)  
 **Orquestração**: Declarative Automation Bundles (DABs)  
