@@ -1,4 +1,4 @@
-# iFood Case - Arquiteto de Dados
+# iFood Case - Arquiteto/Engenheiro de Dados
 
 ## Visão Geral
 Este projeto implementa um pipeline completo de dados para ingestão, transformação e análise de dados de corridas do NYC Yellow e Green Taxi de janeiro a maio de 2023, seguindo o padrão da Arquitetura Medallion (Bronze → Silver → Gold).
