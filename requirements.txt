@@ -20,7 +20,7 @@ numpy>=1.24.0
 # Suporte nativo no Databricks - nenhum pacote adicional necessário
 
 # Ferramentas de Desenvolvimento (opcional)
-# pytest>=7.4.0  # Para testes unitários
+pytest>=7.4.0  # Para testes unitários
 # great-expectations>=0.18.0  # Para validação de qualidade de dados
 # pyyaml>=6.0  # Para parsing de YAML (configuração DABs)
 
