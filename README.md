@@ -22,10 +22,10 @@ O projeto utiliza **Declarative Automation Bundles (DABs)** para orquestração 
    - Fontes: 
      - NYC TLC Yellow Taxi Trip Records (~16.2M registros)
      - NYC TLC Green Taxi Trip Records (~340K registros)
-   - Formato: Arquivos Parquet do S3
+   - Formato: Arquivos Parquet do S3 (um arquivo por mês)
    - Período: Janeiro - Maio 2023
-   - Dados preservados em estado original para auditoria
-   - Inclui timestamp de ingestão
+   - Leitura arquivo a arquivo com `unionByName(allowMissingColumns=True)` para diferenças de schema entre meses/tipos
+   - Casts de tipos via `cast_bronze_columns()` + timestamp de ingestão
 
 2. **Camada Silver** (`silver.taxidata`): Dados limpos e padronizados
    - Colunas renomeadas para nomes business-friendly
@@ -81,7 +81,7 @@ Lógica repetida entre notebooks foi extraída para um único arquivo:
 
 | Função | Uso |
 |--------|-----|
-| `cast_bronze_columns(df)` | Casts de tipos na camada Bronze |
+| `cast_bronze_columns(df)` | Casts de tipos e normalização de `airport_fee` na Bronze |
 | `silver_sql(taxi_type)` | SQL de transformação Silver (yellow/green) |
 | `validar_silver(spark, table)` | Validações de qualidade na camada Silver |
 
@@ -104,12 +104,19 @@ Constantes centralizadas: `DATE_START`, `DATE_END`, `S3_BASE`, `SILVER_DROPNA_SU
 
 **Processo de Ingestão**:
 ```python
+from pyspark.sql.functions import current_timestamp
+
 from pipeline_utils import S3_BASE, cast_bronze_columns
 
 file_list = dbutils.fs.ls(f"{S3_BASE}yellow_taxi/")
 parquet_files = [f.path for f in file_list if f.path.endswith(".parquet")]
 
-df_combined = cast_bronze_columns(spark.read.parquet(*parquet_files))
+# Lê cada mês e une com tolerância a colunas ausentes (ex: airport_fee)
+dfs = [cast_bronze_columns(spark.read.parquet(f)) for f in parquet_files]
+df_combined = dfs[0]
+for df in dfs[1:]:
+    df_combined = df_combined.unionByName(df, allowMissingColumns=True)
+
 df_combined = df_combined.withColumn("ingestion_timestamp", current_timestamp())
 
 df_combined.write.format("delta").mode("overwrite").option("overwriteSchema", "true") \
@@ -338,7 +345,7 @@ gold_transformation (Consolidação)
 **Decisão arquitetural:** Aplicamos diferentes convenções de nomenclatura por camada para equilibrar conformidade com dados brutos e usabilidade para análise de negócio.
 
 #### Bronze Layer - Nomenclatura Original
-**Mantém os nomes exatos da fonte NYC TLC** (ex: `VendorID`, `passenger_count`, `total_amount`, `tpep_pickup_datetime`, `tpep_dropoff_datetime`):
+**Mantém os nomes da fonte NYC TLC**, com casts mínimos de tipo aplicados em `cast_bronze_columns()` (ex: `VendorID`, `passenger_count`, `total_amount`, `tpep_pickup_datetime`):
 
 **Justificativa:**
 - ✅ **Auditoria e rastreabilidade**: Permite verificação direta contra dados originais
@@ -376,7 +383,8 @@ gold_transformation (Consolidação)
 **✅ Todas as 5 colunas requeridas pelo case estão presentes e preservadas em todas as camadas.**
 
 ### 6. Processamento de Múltiplas Fontes
-- Yellow e Green taxi processados separadamente até Silver
+- Yellow e Green taxi processados separadamente na Bronze
+- União mensal com `unionByName(allowMissingColumns=True)` na ingestão
 - União (UNION) na camada de análise quando necessário
 - Preservação das diferenças de schema entre tipos de táxi (ex: `airport_fee` só no Yellow)
 
