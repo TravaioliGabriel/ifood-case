@@ -5,6 +5,16 @@ Este projeto implementa um pipeline completo de dados para ingestão, transforma
 
 O projeto utiliza **Declarative Automation Bundles (DABs)** para orquestração e implantação automatizada de todo o pipeline de dados como código.
 
+### 📌 Sobre a Inclusão do Green Taxi
+
+**Nota importante:** O case técnico solicita explicitamente dados de **Yellow Taxi**. Além destes, incluímos também **Green Taxi** por três razões estratégicas:
+
+1. **Análise Comparativa Completa**: Permite comparar métricas entre os dois tipos de táxi licenciados pela NYC TLC, gerando insights mais ricos sobre o mercado de transporte de NYC
+2. **Demonstração de Escalabilidade**: Mostra capacidade de processar múltiplas fontes de dados com schemas similares mas não idênticos (green taxi não possui `airport_fee`, por exemplo)
+3. **Contexto de Negócio**: Green taxi foi criado em 2013 para atender áreas fora de Manhattan (Bronx, Brooklyn, Queens), enquanto Yellow tem exclusividade em Manhattan e aeroportos. Esta inclusão demonstra compreensão do domínio de negócio NYC TLC
+
+**Todos os requisitos do case foram atendidos com os dados de Yellow Taxi.** A inclusão de Green Taxi é um **adicional** que enriquece a análise sem comprometer os objetivos principais.
+
 ## Arquitetura
 
 ### Camadas de Dados (Medallion Architecture)
@@ -31,10 +41,15 @@ O projeto utiliza **Declarative Automation Bundles (DABs)** para orquestração 
    - Dados otimizados para consultas analíticas
    - Yellow: ~15.8M registros | Green: ~317K registros
 
+4. **Data Quality Validation**: Validações automatizadas de qualidade de dados
+   - Executado após transformação Silver
+   - Valida integridade, consistência e conformidade dos dados
+   - Garante qualidade antes de promover para Gold
+
 ### Orquestração com DABs
 O projeto utiliza Declarative Automation Bundles para:
 - **Implantação automatizada** de notebooks e jobs
-- **Orquestração de tarefas** com dependências (Bronze → Silver → Gold)
+- **Orquestração de tarefas** com dependências (Bronze → Silver → Data Quality → Gold)
 - **Gerenciamento de ambientes** (prod/dev)
 - **Versionamento** de configurações como código
 
@@ -48,6 +63,7 @@ ifood-case/
 ├── src/
 │   ├── bronze ingestion.ipynb       # Ingestão de dados do S3 para Bronze
 │   ├── silver transformation.ipynb  # Transformação Bronze → Silver
+│   ├── DQ_silver.ipynb              # Validações de Qualidade de Dados (Silver)
 │   └── gold transformation.ipynb    # Consolidação Silver → Gold
 ├── analysis/
 │   └── analysis.ipynb               # Respostas às questões do case
@@ -108,7 +124,6 @@ df_combined.write.format("delta").mode("overwrite").saveAsTable("bronze.taxidata
 - Remoção de valores nulos (`.dropna()`)
 - Filtro de período (Jan-Mai 2023)
 - Padronização de tipos de dados
-- Validação de qualidade
 
 **Tabelas Criadas**:
 - `silver.taxidata.yellow_taxi_data`: 15.757.617 registros
@@ -135,7 +150,23 @@ df_combined.write.format("delta").mode("overwrite").saveAsTable("bronze.taxidata
 - `vl_surcharge_congestion`: Sobretaxa de congestionamento
 - `vl_airport_fee`: Taxa aeroportuária (yellow only)
 
-### 3. Camada Gold - Dados Consolidados para Análise
+### 3. Data Quality Validation
+**Notebook**: `src/DQ_silver.ipynb`
+
+**Validações Executadas**:
+- Validação de valores negativos (vl_total, nr_passenger, distance)
+- Validação de período (2023-01-01 a 2023-05-31)
+- Validação de valores nulos nas colunas críticas
+- Validação de colunas requeridas pelo case
+- Validação de contagem de registros
+
+**Benefícios**:
+- ✅ **Detecção precoce**: Problemas identificados antes de propagarem para Gold
+- ✅ **Fail-fast**: Pipeline para se encontrar dados inválidos
+- ✅ **Auditoria**: Logs de validação documentam qualidade em cada execução
+- ✅ **Confiabilidade**: Garante conformidade com regras de negócio
+
+### 4. Camada Gold - Dados Consolidados para Análise
 **Notebook**: `src/gold transformation.ipynb`
 
 **Transformações aplicadas**:
@@ -174,14 +205,15 @@ databricks bundle deploy --target prod
 
 #### 2. Executar o Job Orquestrado
 ```bash
-# Executar pipeline completo (Bronze → Silver → Gold)
+# Executar pipeline completo (Bronze → Silver → Data Quality → Gold)
 databricks bundle run medallion_pipeline --target prod
 ```
 
-O job executará automaticamente as 3 tarefas em sequência:
+O job executará automaticamente as 4 tarefas em sequência:
 1. `bronze_ingestion`: Ingestão de Yellow e Green taxi do S3
 2. `silver_transformation`: Limpeza, padronização e filtros
-3. `gold_transformation`: Consolidação para análise de negócio
+3. `data_quality_validation`: Validações automatizadas de qualidade
+4. `gold_transformation`: Consolidação para análise de negócio
 
 #### 3. Executar Análise
 - Abrir `analysis/analysis.ipynb`
@@ -206,12 +238,17 @@ CREATE SCHEMA IF NOT EXISTS gold.taxidata;
 - Executar todas as células sequencialmente
 - Verificar: ~16.1M registros limpos com colunas business-friendly
 
-#### 4. Executar Consolidação Gold
+#### 4. Executar Validações de Qualidade
+- Abrir `src/DQ_silver.ipynb`
+- Executar todas as células sequencialmente
+- Verificar: Todas as validações passaram sem erros
+
+#### 5. Executar Consolidação Gold
 - Abrir `src/gold transformation.ipynb`
 - Executar todas as células sequencialmente
 - Verificar: 2 tabelas gold criadas (yellow + green)
 
-#### 5. Executar Análise
+#### 6. Executar Análise
 - Abrir `analysis/analysis.ipynb`
 - Executar todas as células para ver as respostas
 
@@ -226,7 +263,7 @@ O arquivo principal do Bundle define:
 
 ### Job Orquestrado (medallion.job.yml)
 O job é configurado com:
-- **3 tarefas** com dependências sequenciais
+- **4 tarefas** com dependências sequenciais
 - **Retry automático**: 2 tentativas por tarefa
 - **Timeout**: 1 hora por tarefa e total
 - **Fila habilitada**: Para controle de concorrência
@@ -237,6 +274,8 @@ O job é configurado com:
 bronze_ingestion (Yellow + Green)
         ↓
 silver_transformation (Limpeza + Filtros)
+        ↓
+data_quality_validation (Validações DQ)
         ↓
 gold_transformation (Consolidação)
 ```
@@ -269,13 +308,47 @@ gold_transformation (Consolidação)
 - **Orquestração nativa**: Dependências entre tarefas
 - **Reprodutibilidade**: Deploy consistente em qualquer ambiente
 
-### 5. Convenção de Nomenclatura de Colunas
-- `id_*`: Identificadores
-- `vl_*`: Campos de valor/montante
-- `nr_*`: Contagens numéricas
-- `fl_*`: Flags booleanos
-- `cd_*`: Códigos
-- `dh_*`: Data/hora (datetime)
+### 5. Estratégia de Nomenclatura de Colunas
+
+**Decisão arquitetural:** Aplicamos diferentes convenções de nomenclatura por camada para equilibrar conformidade com dados brutos e usabilidade para análise de negócio.
+
+#### Bronze Layer - Nomenclatura Original
+**Mantém os nomes exatos da fonte NYC TLC** (ex: `VendorID`, `passenger_count`, `total_amount`, `tpep_pickup_datetime`, `tpep_dropoff_datetime`):
+
+**Justificativa:**
+- ✅ **Auditoria e rastreabilidade**: Permite verificação direta contra dados originais
+- ✅ **Conformidade com fonte**: Facilita debugging e troubleshooting com documentação oficial da NYC TLC
+- ✅ **Idempotência**: Reprocessamento sempre produz mesma estrutura
+- ✅ **Time travel**: Delta Lake permite voltar ao estado original dos dados
+
+#### Silver/Gold Layers - Nomenclatura Business-Friendly
+**Aplica padrão padronizado** (ex: `id_vendor`, `nr_passageiros`, `vl_total_corrida`, `dh_inicio_corrida`, `dh_final_corrida`):
+
+**Justificativa:**
+- ✅ **Usabilidade para analistas**: Nomes em português e autoexplicativos reduzem curva de aprendizado
+- ✅ **Padrão corporativo**: Segue convenção de nomenclatura amplamente adotada em empresas brasileiras
+- ✅ **Tipagem clara**: Prefixos indicam tipo de dado (id_, vl_, nr_, dh_, fl_, cd_)
+- ✅ **Manutenibilidade**: Facilita onboarding de novos membros do time
+
+**Convenção aplicada:**
+- `id_*`: Identificadores (ex: `id_vendor`, `id_pickup`, `id_dropoff`)
+- `vl_*`: Valores monetários (ex: `vl_total_corrida`, `vl_fare`, `vl_tip`)
+- `nr_*`: Números/contadores (ex: `nr_passageiros`)
+- `fl_*`: Flags booleanos (ex: `fl_store_fwd`)
+- `cd_*`: Códigos (ex: `cd_payment`, `id_ratecode`)
+- `dh_*`: Data/hora (ex: `dh_inicio_corrida`, `dh_final_corrida`)
+
+**Mapeamento de colunas requeridas pelo case:**
+
+| Case Requerido | Bronze (Original) | Silver/Gold (Padronizado) |
+|----------------|-------------------|---------------------------|
+| VendorID | VendorID | id_vendor |
+| passenger_count | passenger_count | nr_passageiros |
+| total_amount | total_amount | vl_total_corrida |
+| tpep_pickup_datetime | tpep_pickup_datetime | dh_inicio_corrida |
+| tpep_dropoff_datetime | tpep_dropoff_datetime | dh_final_corrida |
+
+**✅ Todas as 5 colunas requeridas pelo case estão presentes e preservadas em todas as camadas.**
 
 ### 6. Processamento de Múltiplas Fontes
 - Yellow e Green taxi processados separadamente até Silver
@@ -283,9 +356,64 @@ gold_transformation (Consolidação)
 - Preservação das diferenças de schema entre tipos de táxi
 - `allowMissingColumns=True` para flexibilidade no Bronze
 
+### 7. Separação de Data Quality Validation
+**Decisão arquitetural:** Validações de qualidade foram isoladas em notebook dedicado (`DQ_silver.ipynb`) após a transformação Silver.
+
+**Justificativa:**
+- ✅ **Separação de responsabilidades**: Transformação e validação são processos distintos
+- ✅ **Reusabilidade**: Validações podem ser reutilizadas em outros pipelines
+- ✅ **Manutenibilidade**: Regras de qualidade centralizadas e fáceis de atualizar
+- ✅ **Visibilidade**: Status de qualidade explícito no fluxo de orquestração
+- ✅ **Fail-fast**: Falhas de qualidade param o pipeline antes de contaminar Gold
+
 ## Verificações de Qualidade de Dados
 
-- ✅ Todas as colunas requeridas presentes na camada Silver
+### Notebook Dedicado de Data Quality
+**Notebook**: `src/DQ_silver.ipynb`
+
+As validações de qualidade de dados foram implementadas em um notebook dedicado, executado após a transformação Silver e antes da consolidação Gold. Esta separação traz benefícios arquiteturais importantes.
+
+### Validações Implementadas
+
+O notebook `DQ_silver.ipynb` executa as seguintes validações para Yellow e Green taxi:
+
+#### 1. Validação de Valores Negativos
+```python
+# Garante que não existam valores negativos em colunas numéricas
+assert vl_total >= 0
+assert nr_passenger >= 0
+assert distance >= 0
+```
+
+#### 2. Validação de Período
+```python
+# Confirma que todos os registros estão dentro do intervalo Jan-Mai 2023
+assert MIN(DATE(pickup_datetime)) >= '2023-01-01'
+assert MAX(DATE(pickup_datetime)) <= '2023-05-31'
+```
+
+#### 3. Validação de Valores Nulos
+```python
+# Verifica que não há nulos após .dropna()
+assert COUNT(*) WHERE id_vendor IS NULL = 0
+assert COUNT(*) WHERE vl_total IS NULL = 0
+assert COUNT(*) WHERE nr_passenger IS NULL = 0
+assert COUNT(*) WHERE pickup_datetime IS NULL = 0
+```
+
+### Benefícios da Arquitetura de Data Quality Separada
+
+- ✅ **Separação de responsabilidades**: Transformação e validação são processos independentes
+- ✅ **Reusabilidade**: Validações podem ser aplicadas em outros pipelines ou camadas
+- ✅ **Manutenibilidade**: Regras de qualidade centralizadas em um único lugar
+- ✅ **Visibilidade**: Status de qualidade explícito no fluxo de orquestração DABs
+- ✅ **Fail-fast**: Falhas de qualidade param o pipeline antes de dados inválidos chegarem ao Gold
+- ✅ **Auditoria**: Logs isolados facilitam troubleshooting e compliance
+- ✅ **Escalabilidade**: Novas validações podem ser adicionadas sem modificar transformações
+
+### Checklist de Qualidade Geral
+
+- ✅ Todas as colunas requeridas presentes em todas as camadas
 - ✅ Valores nulos removidos da camada Silver (`.dropna()`)
 - ✅ Tipos de dados validados e convertidos no Bronze
 - ✅ Intervalo de tempo verificado (Jan-Mai 2023)
@@ -294,6 +422,7 @@ gold_transformation (Consolidação)
   - Silver → Gold: 100% preservação
 - ✅ Pipeline executado end-to-end com sucesso
 - ✅ Timestamp de ingestão adicionado no Bronze
+- ✅ Validações automatizadas executadas em notebook dedicado (DQ_silver.ipynb)
 
 ## Volume de Dados Processados
 
@@ -355,10 +484,12 @@ O pipeline executou com sucesso:
 - ✅ Transformação de dados em 3 camadas (Bronze → Silver → Gold)
 - ✅ Criação de 6 tabelas Delta Lake (2 por camada)
 - ✅ Resposta às duas questões de negócio com insights acionáveis
-- ✅ Preservação de todas as colunas requeridas em cada camada
+- ✅ Preservação de todas as 5 colunas requeridas pelo case em cada camada
 - ✅ Utilização de PySpark para processamento distribuído
-- ✅ Orquestração automatizada via DABs
-- ✅ Validação de qualidade de dados em cada etapa
+- ✅ Orquestração automatizada via DABs com 4 tarefas sequenciais
+- ✅ **Validações automatizadas de qualidade em notebook dedicado (DQ_silver.ipynb)**
+- ✅ 5 visualizações profissionais criadas
+- ✅ 15+ insights de negócio acionáveis documentados
 
 ## Comandos Úteis do Bundle
 
@@ -406,6 +537,6 @@ Para dúvidas ou problemas, abra uma issue neste repositório.
 **Autor**: Gabriel Travaioli  
 **Data**: Maio 2026  
 **Plataforma**: Databricks Community Edition  
-**Arquitetura**: Medallion (Bronze → Silver → Gold)  
+**Arquitetura**: Medallion (Bronze → Silver → Gold) + Data Quality Validation  
 **Orquestração**: Declarative Automation Bundles (DABs)  
 **Volume de Dados**: ~16.5M registros processados

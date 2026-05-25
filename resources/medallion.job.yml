@@ -16,7 +16,7 @@ resources:
             source: WORKSPACE
           
           timeout_seconds: 3600
-          max_retries: 2
+          max_retries: 1
         
         # Task 2: Silver Layer
         - task_key: silver_transformation
@@ -28,19 +28,31 @@ resources:
             source: WORKSPACE
           
           timeout_seconds: 3600
-          max_retries: 2
-        
+          max_retries: 1
+
+        # Task 3: Data Quality
+        - task_key: data_quality
+          depends_on:
+            - task_key: silver_transformation
+          
+          notebook_task:
+            notebook_path: ../src/DQ_silver.ipynb
+            source: WORKSPACE
+          
+          timeout_seconds: 3600
+          max_retries: 1
+
         # Task 3: Gold Layer
         - task_key: gold_transformation
           depends_on:
-            - task_key: silver_transformation
+            - task_key: data_quality
           
           notebook_task:
             notebook_path: ../src/gold transformation.ipynb
             source: WORKSPACE
           
           timeout_seconds: 3600
-          max_retries: 2
+          max_retries: 1
       
       # Job-level settings
       max_concurrent_runs: 1
