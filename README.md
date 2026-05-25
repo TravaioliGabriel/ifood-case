@@ -29,8 +29,8 @@ O projeto utiliza **Declarative Automation Bundles (DABs)** para orquestração 
 
 2. **Camada Silver** (`silver.taxidata`): Dados limpos e padronizados
    - Colunas renomeadas para nomes business-friendly
-   - Valores nulos removidos via `.dropna()`
-   - Filtro de período aplicado (2023-01-01 a 2023-05-31)
+   - Nulos removidos apenas em colunas críticas via `.dropna(subset=[...])`
+   - Filtro de período (2023-01-01 a 2023-05-31), `total_amount >= 0` e `dropoff >= pickup`
    - Tipos de dados padronizados
    - Dados prontos para análise
    - Yellow: ~15.8M registros | Green: ~317K registros
@@ -50,7 +50,6 @@ O projeto utiliza **Declarative Automation Bundles (DABs)** para orquestração 
 O projeto utiliza Declarative Automation Bundles para:
 - **Implantação automatizada** de notebooks e jobs
 - **Orquestração de tarefas** com dependências (Bronze → Silver → Data Quality → Gold)
-- **Gerenciamento de ambientes** (prod/dev)
 - **Versionamento** de configurações como código
 
 ## Estrutura do Projeto
@@ -61,10 +60,14 @@ ifood-case/
 ├── resources/
 │   └── medallion.job.yml            # Definição do Job orquestrado
 ├── src/
+│   ├── pipeline_utils.py            # Funções compartilhadas (Bronze, Silver, DQ)
 │   ├── bronze ingestion.ipynb       # Ingestão de dados do S3 para Bronze
 │   ├── silver transformation.ipynb  # Transformação Bronze → Silver
 │   ├── DQ_silver.ipynb              # Validações de Qualidade de Dados (Silver)
 │   └── gold transformation.ipynb    # Consolidação Silver → Gold
+├── tests/
+│   ├── conftest.py                  # Configuração do pytest
+│   └── test_pipeline.py             # Testes unitários da lógica compartilhada
 ├── analysis/
 │   ├── analysis.ipynb               # Respostas às questões do case
 │   └── Agente Text-to-SQL.ipynb     # Agente IA de geração de SQL
@@ -72,14 +75,26 @@ ifood-case/
 └── requirements.txt                  # Dependências Python
 ```
 
+### Funções compartilhadas (`src/pipeline_utils.py`)
+
+Lógica repetida entre notebooks foi extraída para um único arquivo:
+
+| Função | Uso |
+|--------|-----|
+| `cast_bronze_columns(df)` | Casts de tipos na camada Bronze |
+| `silver_sql(taxi_type)` | SQL de transformação Silver (yellow/green) |
+| `validar_silver(spark, table)` | Validações de qualidade na camada Silver |
+
+Constantes centralizadas: `DATE_START`, `DATE_END`, `S3_BASE`, `SILVER_DROPNA_SUBSET`.
+
 ## Tecnologias Utilizadas
 - **Plataforma**: Databricks Community Edition
 - **Armazenamento**: AWS S3 (landing zone)
 - **Formato de Dados**: Delta Lake
 - **Processamento**: PySpark + Databricks SQL
-- **Catálogo**: Unity Catalog (schemas bronze, silver, gold)
+- **Catálogo**: Unity Catalog (catálogos `bronze`, `silver`, `gold` + schema `taxidata`)
 - **Orquestração**: Declarative Automation Bundles (DABs)
-- **CI/CD**: Databricks CLI + Bundle deployment
+- **Testes**: pytest (lógica em `pipeline_utils.py`)
 - **IA/ML**: Databricks Foundation Models (Llama 4 Maverick)
 
 ## Pipeline de Dados
@@ -89,21 +104,16 @@ ifood-case/
 
 **Processo de Ingestão**:
 ```python
-# Lê todos os arquivos parquet do S3 e consolida
-file_list = dbutils.fs.ls("s3://trip-records-taxi-data/yellow_taxi/")
-parquet_files = [f.path for f in file_list if f.path.endswith('.parquet')]
+from pipeline_utils import S3_BASE, cast_bronze_columns
 
-# União de todos os meses com padronização de tipos
-df_combined = spark.read.parquet(parquet_files[0])
-for file_path in parquet_files[1:]:
-    df_temp = spark.read.parquet(file_path)
-    df_combined = df_combined.unionByName(df_temp, allowMissingColumns=True)
+file_list = dbutils.fs.ls(f"{S3_BASE}yellow_taxi/")
+parquet_files = [f.path for f in file_list if f.path.endswith(".parquet")]
 
-# Adiciona timestamp de ingestão
+df_combined = cast_bronze_columns(spark.read.parquet(*parquet_files))
 df_combined = df_combined.withColumn("ingestion_timestamp", current_timestamp())
 
-# Salva em Delta Lake
-df_combined.write.format("delta").mode("overwrite").saveAsTable("bronze.taxidata.yellow_taxi_data")
+df_combined.write.format("delta").mode("overwrite").option("overwriteSchema", "true") \
+    .saveAsTable("bronze.taxidata.yellow_taxi_data")
 ```
 
 **Tabelas Criadas**:
@@ -123,9 +133,9 @@ df_combined.write.format("delta").mode("overwrite").saveAsTable("bronze.taxidata
 
 **Transformações aplicadas**:
 - Renomeação de colunas (nomes business-friendly)
-- Remoção de valores nulos (`.dropna()`)
-- Filtro de período (Jan-Mai 2023)
-- Padronização de tipos de dados
+- Remoção de nulos apenas em colunas críticas (`.dropna(subset=SILVER_DROPNA_SUBSET)`)
+- Filtro de período (Jan-Mai 2023), valores negativos e corridas inválidas (`dropoff < pickup`)
+- SQL gerado por `silver_sql("yellow")` / `silver_sql("green")` em `pipeline_utils.py`
 
 **Tabelas Criadas**:
 - `silver.taxidata.yellow_taxi_data`: 15.757.617 registros
@@ -155,12 +165,10 @@ df_combined.write.format("delta").mode("overwrite").saveAsTable("bronze.taxidata
 ### 3. Data Quality Validation
 **Notebook**: `src/DQ_silver.ipynb`
 
-**Validações Executadas**:
-- Validação de valores negativos (vl_total, nr_passenger, distance)
-- Validação de período (2023-01-01 a 2023-05-31)
-- Validação de valores nulos nas colunas críticas
-- Validação de colunas requeridas pelo case
-- Validação de contagem de registros
+**Validações Executadas** (via `validar_silver()` para Yellow e Green):
+- Valores negativos em `vl_total`, `nr_passenger` e `distance`
+- Período entre 2023-01-01 e 2023-05-31
+- Nulos em colunas críticas (`id_vendor`, `vl_total`, `nr_passenger`, `pickup_datetime`)
 
 **Benefícios**:
 - ✅ **Detecção precoce**: Problemas identificados antes de propagarem para Gold
@@ -214,12 +222,28 @@ databricks bundle run medallion_pipeline --target prod
 O job executará automaticamente as 4 tarefas em sequência:
 1. `bronze_ingestion`: Ingestão de Yellow e Green taxi do S3
 2. `silver_transformation`: Limpeza, padronização e filtros
-3. `data_quality_validation`: Validações automatizadas de qualidade
+3. `data_quality`: Validações automatizadas de qualidade
 4. `gold_transformation`: Consolidação para análise de negócio
 
 #### 3. Executar Análise
 - Abrir `analysis/analysis.ipynb`
 - Executar todas as células para ver as respostas
+
+### Testes unitários (local ou Databricks)
+
+Validam a lógica de `pipeline_utils.py` antes de rodar o pipeline:
+
+```bash
+pip install pytest pyspark   # pyspark opcional para 1 teste de dropna
+pytest tests/ -v
+```
+
+No Databricks (com o repo clonado):
+
+```bash
+%pip install pytest
+%sh pytest /Workspace/Repos/<seu-usuario>/ifood-case/tests/ -v
+```
 
 ### Opção 2: Execução Manual (Passo a Passo)
 
@@ -266,7 +290,7 @@ O arquivo principal do Bundle define:
 ### Job Orquestrado (medallion.job.yml)
 O job é configurado com:
 - **4 tarefas** com dependências sequenciais
-- **Retry automático**: 2 tentativas por tarefa
+- **Retry automático**: 1 tentativa por tarefa
 - **Timeout**: 1 hora por tarefa e total
 - **Fila habilitada**: Para controle de concorrência
 - **Tags**: environment, project, architecture
@@ -277,7 +301,7 @@ bronze_ingestion (Yellow + Green)
         ↓
 silver_transformation (Limpeza + Filtros)
         ↓
-data_quality_validation (Validações DQ)
+data_quality (Validações DQ)
         ↓
 gold_transformation (Consolidação)
 ```
@@ -299,16 +323,15 @@ gold_transformation (Consolidação)
 
 ### 3. Unity Catalog
 - Gerenciamento centralizado de metadados
-- Organização por schemas (bronze/silver/gold)
+- Organização por catálogos (`bronze`, `silver`, `gold`) e schema de domínio (`taxidata`)
 - Governança de dados embutida
 - Linhagem de dados rastreável
 
 ### 4. Declarative Automation Bundles (DABs)
 - **Infraestrutura como código**: Toda configuração versionada
-- **Deployment automatizado**: CI/CD simplificado
-- **Ambientes isolados**: Prod/dev separados
+- **Deployment automatizado** via Databricks CLI
 - **Orquestração nativa**: Dependências entre tarefas
-- **Reprodutibilidade**: Deploy consistente em qualquer ambiente
+- **Reprodutibilidade**: Deploy consistente no workspace
 
 ### 5. Estratégia de Nomenclatura de Colunas
 
@@ -355,18 +378,23 @@ gold_transformation (Consolidação)
 ### 6. Processamento de Múltiplas Fontes
 - Yellow e Green taxi processados separadamente até Silver
 - União (UNION) na camada de análise quando necessário
-- Preservação das diferenças de schema entre tipos de táxi
-- `allowMissingColumns=True` para flexibilidade no Bronze
+- Preservação das diferenças de schema entre tipos de táxi (ex: `airport_fee` só no Yellow)
 
 ### 7. Separação de Data Quality Validation
-**Decisão arquitetural:** Validações de qualidade foram isoladas em notebook dedicado (`DQ_silver.ipynb`) após a transformação Silver.
+**Decisão arquitetural:** Validações de qualidade foram isoladas em notebook dedicado (`DQ_silver.ipynb`) após a transformação Silver, com regras centralizadas em `validar_silver()` no `pipeline_utils.py`.
 
 **Justificativa:**
 - ✅ **Separação de responsabilidades**: Transformação e validação são processos distintos
-- ✅ **Reusabilidade**: Validações podem ser reutilizadas em outros pipelines
-- ✅ **Manutenibilidade**: Regras de qualidade centralizadas e fáceis de atualizar
+- ✅ **Reusabilidade**: A mesma função valida Yellow e Green taxi
+- ✅ **Manutenibilidade**: Regras de qualidade em um único lugar
 - ✅ **Visibilidade**: Status de qualidade explícito no fluxo de orquestração
 - ✅ **Fail-fast**: Falhas de qualidade param o pipeline antes de contaminar Gold
+
+### 8. Testes unitários
+**Decisão:** Lógica compartilhada testada com pytest localmente, sem depender do cluster Databricks.
+
+- Testes de SQL Silver (yellow/green) rodam sem Spark
+- Teste de `dropna(subset=...)` valida que colunas opcionais (ex: gorjeta) não descartam a linha inteira
 
 ## Verificações de Qualidade de Dados
 
@@ -377,7 +405,7 @@ As validações de qualidade de dados foram implementadas em um notebook dedicad
 
 ### Validações Implementadas
 
-O notebook `DQ_silver.ipynb` executa as seguintes validações para Yellow e Green taxi:
+A função `validar_silver()` executa as seguintes validações para Yellow e Green taxi:
 
 #### 1. Validação de Valores Negativos
 ```python
@@ -396,7 +424,7 @@ assert MAX(DATE(pickup_datetime)) <= '2023-05-31'
 
 #### 3. Validação de Valores Nulos
 ```python
-# Verifica que não há nulos após .dropna()
+# Verifica que não há nulos nas colunas críticas após dropna(subset=...)
 assert COUNT(*) WHERE id_vendor IS NULL = 0
 assert COUNT(*) WHERE vl_total IS NULL = 0
 assert COUNT(*) WHERE nr_passenger IS NULL = 0
@@ -416,7 +444,7 @@ assert COUNT(*) WHERE pickup_datetime IS NULL = 0
 ### Checklist de Qualidade Geral
 
 - ✅ Todas as colunas requeridas presentes em todas as camadas
-- ✅ Valores nulos removidos da camada Silver (`.dropna()`)
+- ✅ Nulos removidos apenas em colunas críticas na Silver (`.dropna(subset=...)`)
 - ✅ Tipos de dados validados e convertidos no Bronze
 - ✅ Intervalo de tempo verificado (Jan-Mai 2023)
 - ✅ Contagens de registros validadas entre camadas:
@@ -437,7 +465,25 @@ assert COUNT(*) WHERE pickup_datetime IS NULL = 0
 **Perda de dados Bronze → Silver**: ~450K registros (2.7%)
 - Motivo: Valores nulos removidos + registros fora do período Jan-Mai 2023
 
+## Respostas às Perguntas do Case
+
+**Pergunta 1** — média de valor total por corrida (`AVG` de `vl_total_corrida`), agrupada por mês, considerando todos os yellow táxis da frota.
+
+**Pergunta 2** — média de passageiros por hora do dia em maio/2023, unindo Yellow e Green taxi.
+
+Detalhes e visualizações em `analysis/analysis.ipynb`.
+
 ## Queries de Exemplo
+
+### Ticket Médio por Mês (Yellow Taxi)
+```sql
+SELECT 
+  month(dh_inicio_corrida) AS mes,
+  ROUND(AVG(vl_total_corrida), 2) AS media_valor_corrida
+FROM gold.taxidata.yellow_taxi_data
+GROUP BY mes
+ORDER BY mes;
+```
 
 ### Receita Total por Mês (Yellow Taxi)
 ```sql
@@ -727,6 +773,7 @@ O pipeline executou com sucesso:
 - ✅ Preservação de todas as 5 colunas requeridas pelo case em cada camada
 - ✅ Utilização de PySpark para processamento distribuído
 - ✅ Orquestração automatizada via DABs com 4 tarefas sequenciais
+- ✅ **Testes unitários com pytest para `pipeline_utils.py`**
 - ✅ **Validações automatizadas de qualidade em notebook dedicado (DQ_silver.ipynb)**
 - ✅ **Agente de IA text-to-SQL funcional com 4 exemplos testados e validados**
 - ✅ 5 visualizações profissionais criadas
