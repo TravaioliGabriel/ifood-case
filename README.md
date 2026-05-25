@@ -66,7 +66,8 @@ ifood-case/
 │   ├── DQ_silver.ipynb              # Validações de Qualidade de Dados (Silver)
 │   └── gold transformation.ipynb    # Consolidação Silver → Gold
 ├── analysis/
-│   └── analysis.ipynb               # Respostas às questões do case
+│   ├── analysis.ipynb               # Respostas às questões do case
+│   └── Agente Text-to-SQL.ipynb     # Agente IA de geração de SQL
 ├── README.md                         # Este arquivo
 └── requirements.txt                  # Dependências Python
 ```
@@ -79,6 +80,7 @@ ifood-case/
 - **Catálogo**: Unity Catalog (schemas bronze, silver, gold)
 - **Orquestração**: Declarative Automation Bundles (DABs)
 - **CI/CD**: Databricks CLI + Bundle deployment
+- **IA/ML**: Databricks Foundation Models (Llama 4 Maverick)
 
 ## Pipeline de Dados
 
@@ -477,6 +479,244 @@ GROUP BY id_vendor
 ORDER BY total_corridas DESC;
 ```
 
+## 🤖 Agente de IA Text-to-SQL
+
+### Visão Geral
+
+Desenvolvemos um **agente inteligente de geração de SQL** usando o Databricks Foundation Models para democratizar o acesso aos dados através de linguagem natural. O agente permite que usuários de negócio façam perguntas em português e recebam automaticamente queries SQL executadas contra as tabelas do Unity Catalog.
+
+**Notebook**: `analysis/Agente Text-to-SQL.ipynb`
+
+### Arquitetura do Agente
+
+O agente foi construído com um sistema completo de produção que inclui:
+
+- **Geração de SQL**: Usa Llama 4 Maverick (17B parâmetros ativos, 128K tokens de contexto)
+- **Validação**: Verifica sintaxe e bloqueia comandos perigosos (DROP, DELETE, etc)
+- **Execução**: Roda queries contra tabelas reais do Unity Catalog
+- **Auto-correção**: Retry automático com contexto de erro (até 3 tentativas)
+- **Histórico**: Mantém log de queries para aprendizado e auditoria
+
+### Tecnologias Utilizadas
+
+- **LLM**: Databricks Foundation Model - Llama 4 Maverick
+- **Framework**: Mosaic AI Agent Framework
+- **API**: MLflow Deployments Client
+- **Processamento**: PySpark para execução de queries
+- **Validação**: Spark SQL EXPLAIN para verificação de sintaxe
+
+### Schema Context
+
+O agente possui conhecimento completo do schema das tabelas Gold:
+
+```python
+SCHEMA_CONTEXT = """
+## Schema do Banco de Dados - Dados de Táxi
+
+### Tabela: gold.taxidata.yellow_taxi_data
+- id_vendor (LONG): ID do fornecedor/empresa de táxi
+- dh_inicio_corrida (TIMESTAMP_NTZ): Data e hora de início da corrida
+- dh_final_corrida (TIMESTAMP_NTZ): Data e hora de término da corrida
+- vl_total_corrida (DOUBLE): Valor total cobrado pela corrida em dólares
+- nr_passageiros (DOUBLE): Número de passageiros na corrida
+
+### Tabela: gold.taxidata.green_taxi_data
+(Mesma estrutura da yellow_taxi_data)
+
+## Notas importantes:
+- Use TIMESTAMP_NTZ para filtros de data/hora
+- Para calcular duração: dh_final_corrida - dh_inicio_corrida
+- Valores monetários em dólares (USD)
+- Use UNION ALL para combinar as duas tabelas
+"""
+```
+
+### Exemplos de Uso Testados
+
+#### Exemplo 1: Contagem de Corridas por Período
+**Pergunta**: "Quantas corridas de táxi amarelo tivemos nos 30 dias de abril em 2023?"
+
+**SQL Gerado**:
+```sql
+SELECT 
+    COUNT(*) AS qt_corridas 
+FROM 
+    gold.taxidata.yellow_taxi_data 
+WHERE 
+    dh_inicio_corrida >= '2023-04-01' 
+    AND dh_inicio_corrida < '2023-05-01'
+LIMIT 100;
+```
+
+**Resultado**: 3.167.803 corridas em abril de 2023
+
+#### Exemplo 2: Análise de Receita com CTE
+**Pergunta**: "Qual foi a receita total de corridas de táxi verde vs amarelo?"
+
+**SQL Gerado**:
+```sql
+WITH 
+    receita_total_verde AS (
+        SELECT 
+            SUM(vl_total_corrida) AS total_verde
+        FROM 
+            gold.taxidata.green_taxi_data
+    ),
+    receita_total_amarelo AS (
+        SELECT 
+            SUM(vl_total_corrida) AS total_amarelo
+        FROM 
+            gold.taxidata.yellow_taxi_data
+    )
+SELECT 
+    total_verde, 
+    total_amarelo
+FROM 
+    receita_total_verde, 
+    receita_total_amarelo
+LIMIT 100;
+```
+
+**Resultado**:
+| Total Verde (USD) | Total Amarelo (USD) |
+|-------------------|---------------------|
+| $7,000,728.21 | $441,247,858.04 |
+
+**Insight**: Táxis amarelos geraram ~63x mais receita que os verdes
+
+#### Exemplo 3: Cálculos Temporais Avançados
+**Pergunta**: "Qual é a duração média das corridas de táxi em minutos?"
+
+**SQL Gerado**:
+```sql
+WITH corridas_combinadas AS (
+  SELECT 
+    dh_inicio_corrida,
+    dh_final_corrida
+  FROM gold.taxidata.yellow_taxi_data
+  UNION ALL
+  SELECT 
+    dh_inicio_corrida,
+    dh_final_corrida
+  FROM gold.taxidata.green_taxi_data
+)
+SELECT 
+  AVG(TIMESTAMPDIFF(MINUTE, dh_inicio_corrida, dh_final_corrida)) AS duracao_media_minutos
+FROM corridas_combinadas
+LIMIT 100;
+```
+
+**Resultado**: ~16.35 minutos de duração média
+
+#### Exemplo 4: Análise Temporal por Hora
+**Pergunta**: "Quantas corridas acontecem por hora do dia em média?"
+
+**SQL Gerado**: Query complexa com CTEs aninhados, agregações múltiplas e GROUP BY
+
+**Resultado - Horários de Pico**:
+- **18h (6 PM)**: ~1,14 milhão de corridas (maior pico)
+- **16h (4 PM)**: ~1,00 milhão de corridas
+- **12h (meio-dia)**: ~877 mil corridas
+- **4h (madrugada)**: ~80 mil corridas (menor movimento)
+
+### Capacidades do Agente
+
+✅ **Geração Inteligente de SQL**
+- Queries complexas com JOINs, CTEs, agregações múltiplas
+- Suporte a UNION ALL para combinar múltiplas tabelas
+- Cálculos temporais (duração, hora do dia, diferenças)
+- Aliases descritivos em português
+- Filtros de período inteligentes
+
+✅ **Validação e Segurança**
+- Bloqueia comandos perigosos (DROP, DELETE, ALTER, TRUNCATE)
+- Valida sintaxe SQL antes de executar (via EXPLAIN)
+- Aceita CTEs (Common Table Expressions)
+- Verifica colunas contra schema definido
+- Suporta apenas queries SELECT
+
+✅ **Execução e Resultados**
+- Executa queries contra tabelas reais do Unity Catalog
+- Retorna dados em DataFrame pandas para análise
+- Limite de segurança de 1000 linhas por query
+- Display automático de resultados tabulares
+- Tratamento de erros com mensagens descritivas
+
+✅ **Auto-correção Inteligente**
+- Retry automático em caso de erro (até 3 tentativas)
+- Contexto de erro passado para próxima tentativa
+- Histórico completo de queries para aprendizado
+- Correção automática de sintaxe e aliases
+- Logs detalhados de cada tentativa
+
+### Como Usar o Agente
+
+#### 1. Inicializar o Agente
+```python
+# O agente já está inicializado no notebook
+agent = TextToSQLAgent(
+    model_name="databricks-llama-4-maverick",
+    schema_context=SCHEMA_CONTEXT
+)
+```
+
+#### 2. Fazer Perguntas em Linguagem Natural
+```python
+result = agent.answer_question("Quantas corridas tivemos no total?")
+
+if result['success']:
+    display(result['data'])
+    print(f"SQL: {result['sql']}")
+else:
+    print(f"Erro: {result['error']}")
+```
+
+#### 3. Acessar Histórico de Queries
+```python
+# Ver todas as queries executadas
+for query in agent.query_history:
+    print(f"Pergunta: {query['question']}")
+    print(f"SQL: {query['sql']}")
+    print(f"Sucesso: {query.get('success', False)}")
+    print(f"Tentativas: {query.get('attempt', 1)}")
+```
+
+### Benefícios do Agente
+
+🎯 **Democratização de Dados**
+- Usuários de negócio acessam dados sem conhecer SQL
+- Reduz dependência do time de dados
+- Acelera análises ad-hoc e exploratórias
+
+🚀 **Produtividade**
+- Gera queries complexas em segundos
+- Elimina erros de sintaxe comuns
+- Auto-correção reduz iterações manuais
+- Histórico permite reutilização de queries
+
+🔒 **Segurança**
+- Validação automática antes de execução
+- Bloqueia operações destrutivas (DROP, DELETE)
+- Limite de resultados para performance
+- Logs de auditoria completos
+
+📊 **Qualidade**
+- Queries seguem best practices SQL
+- Nomes de colunas padronizados
+- Resultados sempre validados
+- CTEs para queries complexas
+
+### Possibilidades de Extensão
+
+O agente pode ser evoluído para:
+- 🌐 **Interface Web**: Deploy como API REST ou Streamlit app
+- 💬 **Integração Slack/Teams**: Bot conversacional para equipes
+- 📈 **Visualizações Automáticas**: Gráficos gerados automaticamente após execução
+- 🔍 **RAG com Vector Search**: Memória de queries similares para sugestões
+- 🎯 **Recomendações**: Sugestão de análises baseada no histórico
+- 🔐 **Governança**: Logs de auditoria e controle de acesso por usuário
+- 📊 **Dashboard Automático**: Criação de dashboards baseados em perguntas frequentes
+
 ## Resultados do Pipeline
 
 O pipeline executou com sucesso:
@@ -488,6 +728,7 @@ O pipeline executou com sucesso:
 - ✅ Utilização de PySpark para processamento distribuído
 - ✅ Orquestração automatizada via DABs com 4 tarefas sequenciais
 - ✅ **Validações automatizadas de qualidade em notebook dedicado (DQ_silver.ipynb)**
+- ✅ **Agente de IA text-to-SQL funcional com 4 exemplos testados e validados**
 - ✅ 5 visualizações profissionais criadas
 - ✅ 15+ insights de negócio acionáveis documentados
 
@@ -539,4 +780,5 @@ Para dúvidas ou problemas, abra uma issue neste repositório.
 **Plataforma**: Databricks Community Edition  
 **Arquitetura**: Medallion (Bronze → Silver → Gold) + Data Quality Validation  
 **Orquestração**: Declarative Automation Bundles (DABs)  
+**IA/ML**: Agente Text-to-SQL com Foundation Models (Llama 4 Maverick)  
 **Volume de Dados**: ~16.5M registros processados
